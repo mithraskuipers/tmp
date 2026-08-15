@@ -1,0 +1,7 @@
+# 1. Is this PowerShell process 64-bit or 32-bit?
+[Environment]::Is64BitProcess
+
+# 2. Is your installed Office 32-bit or 64-bit?
+(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue).Platform
+# if that returns nothing, also try:
+(Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue).Platform
