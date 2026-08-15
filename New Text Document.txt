@@ -12,3 +12,8 @@ Get-Process WINWORD, EXCEL -ErrorAction SilentlyContinue |
 $w = New-Object -ComObject Word.Application
 $w.Visible = $false
 $w.Quit()
+
+
+
+Get-Process WINWORD, EXCEL -ErrorAction SilentlyContinue |
+    Select-Object Id, MainWindowTitle, StartTime, Path | Format-Table -AutoSize
