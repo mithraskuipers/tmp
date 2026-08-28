@@ -240,10 +240,15 @@ $form.Location        = New-Object System.Drawing.Point(-2000, -2000)
 $form.Size            = New-Object System.Drawing.Size(1, 1)
 $form.Opacity         = 0
 
-if (-not [HotkeyForm]::RegisterHotKey($form.Handle, $ToggleHotkeyId, $ToggleModifiers, $ToggleKey)) {
+# Save the handle now, while the form is alive - Application.Exit() closes
+# and disposes the form before the cleanup code below runs, so re-reading
+# $form.Handle at that point no longer returns a valid IntPtr.
+$FormHandle = $form.Handle
+
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ToggleHotkeyId, $ToggleModifiers, $ToggleKey)) {
     Write-Host "Failed to register the TOGGLE hotkey ($ToggleDisplay). It may already be in use by another app." -ForegroundColor Red
 }
-if (-not [HotkeyForm]::RegisterHotKey($form.Handle, $ExitHotkeyId, $ExitModifiers, $ExitKey)) {
+if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers, $ExitKey)) {
     Write-Host "Failed to register the EXIT hotkey ($ExitDisplay). It may already be in use by another app." -ForegroundColor Red
 }
 
@@ -346,6 +351,6 @@ $form.Add_HotkeyPressed($hotkeyAction)
 
 # Cleanup on exit
 $timer.Stop()
-[HotkeyForm]::UnregisterHotKey($form.Handle, $ToggleHotkeyId) | Out-Null
-[HotkeyForm]::UnregisterHotKey($form.Handle, $ExitHotkeyId)   | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
+[HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
 Write-Host "CommandRelay stopped."

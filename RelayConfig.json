@@ -1,7 +1,7 @@
 ﻿{
     "LogFile":  "CapturedOutput.txt",
-    "CopyDelayMs":  150,
-    "AfterActionKeyDelayMs":  150,
+    "CopyDelayMs":  250,
+    "AfterActionKeyDelayMs":  250,
     "TimerTickMs":  50,
     "ActionKeyDisplay":  "F5",
     "ActionKeyToken":  "{F5}",
