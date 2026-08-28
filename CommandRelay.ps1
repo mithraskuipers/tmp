@@ -204,6 +204,9 @@ public static class Win32
 
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
 }
 
 public class HotkeyForm : Form
@@ -373,7 +376,10 @@ function Show-FilenamePrompt {
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text            = "Start Capture"
-    $dlg.Size            = New-Object System.Drawing.Size(380, 160)
+    # ClientSize (not Size) so the title bar/border chrome doesn't eat
+    # into the usable area - that was clipping the bottom of the Start
+    # Capture/Cancel buttons.
+    $dlg.ClientSize      = New-Object System.Drawing.Size(370, 140)
     $dlg.StartPosition   = 'CenterScreen'
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox     = $false
@@ -543,14 +549,24 @@ function Select-TargetWindow {
 function Confirm-TargetWindow {
     param([string]$Title)
     $msg = "Target window identified:`n`n$Title`n`nIs this correct?"
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        $msg,
-        "Confirm Target Window",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question,
-        [System.Windows.Forms.MessageBoxDefaultButton]::Button1
-    )
-    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+
+    # Using the raw Win32 MessageBoxW (instead of
+    # [System.Windows.Forms.MessageBox]::Show) so we can pass
+    # MB_SETFOREGROUND/MB_TOPMOST - this is what's triggered from a
+    # global hotkey handler, so there is no already-focused WinForms
+    # window to make it foreground/active. Without these flags the box
+    # can appear behind or without keyboard focus, forcing a mouse click
+    # instead of just pressing Enter for the (still) default Yes button.
+    $MB_YESNO         = 0x00000004
+    $MB_ICONQUESTION  = 0x00000020
+    $MB_DEFBUTTON1    = 0x00000000
+    $MB_TOPMOST       = 0x00040000
+    $MB_SETFOREGROUND = 0x00010000
+    $flags = $MB_YESNO -bor $MB_ICONQUESTION -bor $MB_DEFBUTTON1 -bor $MB_TOPMOST -bor $MB_SETFOREGROUND
+
+    $IDYES = 6
+    $result = [Win32]::MessageBoxW([IntPtr]::Zero, $msg, "Confirm Target Window", [uint32]$flags)
+    return ($result -eq $IDYES)
 }
 
 # Shown when back-to-back captures come back nearly identical. Returns
@@ -598,6 +614,23 @@ function Show-DuplicateCapturePrompt {
 
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { return 'Continue' }
     return 'Stop'
+}
+
+# Fully resets every piece of session state to "off". Used by both the
+# manual toggle-off and the duplicate-capture "Stop" choice, so a new
+# session started afterwards always begins from the same clean slate
+# instead of possibly inheriting stale state (leftover State/elapsed
+# counters, a suppressed duplicate-warning flag, the previous capture's
+# text, etc.) from however the previous session ended.
+function Stop-RelayCapture {
+    $timer.Stop()
+    $global:CR_Running            = $false
+    $global:CR_State              = 'Idle'
+    $global:CR_ElapsedMs          = 0
+    $global:CR_PrevCaptureText    = $null
+    $global:CR_SuppressDupWarning = $false
+    $global:CR_TargetHandle       = [IntPtr]::Zero
+    Hide-RelayStatus
 }
 
 # Brings the target window to the foreground before an automated key is
@@ -668,8 +701,7 @@ $tickAction = {
             'Idle' {
                 if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                     Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
-                    $global:CR_Running = $false
-                    Hide-RelayStatus
+                    Stop-RelayCapture
                     return
                 }
                 Set-RelayStatus "-> $($global:CR_TargetTitle) : Copying (Ctrl+C)" ([System.Drawing.Color]::Lime)
@@ -701,8 +733,7 @@ $tickAction = {
 
                                         $choice = Show-DuplicateCapturePrompt -Similarity $similarity -TargetTitle $global:CR_TargetTitle
                                         if ($choice -eq 'Stop') {
-                                            $global:CR_Running = $false
-                                            Hide-RelayStatus
+                                            Stop-RelayCapture
                                             Write-Host "[CommandRelay] Capture STOPPED (duplicate content confirmed by user)." -ForegroundColor Cyan
                                             $stopRequested = $true
                                         } else {
@@ -736,8 +767,7 @@ $tickAction = {
 
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                         Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
-                        $global:CR_Running = $false
-                        Hide-RelayStatus
+                        Stop-RelayCapture
                         return
                     }
                     Set-RelayStatus "-> $($global:CR_TargetTitle) : Sending $ActionKeyDisplay" ([System.Drawing.Color]::Orange)
@@ -812,6 +842,15 @@ $hotkeyAction = {
                 $global:CR_ElapsedMs    = 0
                 $global:CR_PrevCaptureText    = $null
                 $global:CR_SuppressDupWarning = $false
+
+                # Stop then Start (rather than just Start) so the timer's
+                # own interval countdown always begins fresh for this new
+                # session, regardless of whatever state - running, stopped
+                # via duplicate-detection, stopped manually - it was left
+                # in by the previous one.
+                $timer.Stop()
+                $timer.Start()
+
                 Write-Host "[CommandRelay] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
                 Write-Host "[CommandRelay] Target window -> $($target.Title)" -ForegroundColor Green
                 Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
@@ -819,8 +858,7 @@ $hotkeyAction = {
                 $global:CR_Selecting = $false
             }
         } else {
-            $global:CR_Running = $false
-            Hide-RelayStatus
+            Stop-RelayCapture
             Write-Host "[CommandRelay] Capture STOPPED" -ForegroundColor Cyan
         }
     }
