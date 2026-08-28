@@ -37,12 +37,14 @@
 
    [Exit hotkey]    -> Fully quits this script
 
- All settings - default log location, timing, the action key, and
- both hotkeys - are read from RelayConfig.json (same folder as this
- script). Use ConfigGUI.ps1 (or the "ConfigureCommandRelay.bat"
- launcher) to change them without editing this file. If
- RelayConfig.json doesn't exist yet, a default one is created
- automatically on first run.
+ All settings - default log location, timing, the action key, both
+ hotkeys, and how many rows to skip at the start/end of each capture
+ (e.g. to drop a repeated header/footer row a target app always
+ copies along with the data) - are read from RelayConfig.json (same
+ folder as this script). Use ConfigGUI.ps1 (or the
+ "ConfigureCommandRelay.bat" launcher) to change them without editing
+ this file. If RelayConfig.json doesn't exist yet, a default one is
+ created automatically on first run.
 
  IMPORTANT:
    - Must run in STA mode (needed for clipboard access). The
@@ -62,6 +64,8 @@ function Get-DefaultConfig {
         CopyDelayMs           = 150
         AfterActionKeyDelayMs = 150
         TimerTickMs           = 50
+        SkipRowsStart         = 0
+        SkipRowsEnd           = 0
         ActionKeyDisplay      = "F8"
         ActionKeyToken        = "{F8}"
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }  # Ctrl+Alt+C
@@ -107,6 +111,17 @@ if ($Config.PSObject.Properties.Name -contains 'ActionKeyToken') {
 } else {
     $ActionKeyToken   = '{F8}'
     $ActionKeyDisplay = 'F8'
+}
+
+if ($Config.PSObject.Properties.Name -contains 'SkipRowsStart') {
+    $SkipRowsStart = [int]$Config.SkipRowsStart
+} else {
+    $SkipRowsStart = 0
+}
+if ($Config.PSObject.Properties.Name -contains 'SkipRowsEnd') {
+    $SkipRowsEnd = [int]$Config.SkipRowsEnd
+} else {
+    $SkipRowsEnd = 0
 }
 
 $ToggleHotkeyId  = 1
@@ -248,6 +263,42 @@ function Get-SafeFileName {
         if ($invalid -contains $ch) { [void]$sb.Append('_') } else { [void]$sb.Append($ch) }
     }
     return $sb.ToString()
+}
+
+# Drops the first $SkipStart and last $SkipEnd rows from one captured
+# clipboard chunk before it's written to the log. Used to strip off
+# headers/footers that a target app includes with every Ctrl+C (e.g.
+# a column header row and a totals row). Returns '' when there aren't
+# enough rows left after skipping - the caller should then write
+# nothing for that cycle rather than an empty line.
+function Get-FilteredCaptureText {
+    param(
+        [string]$Text,
+        [int]$SkipStart,
+        [int]$SkipEnd
+    )
+
+    if ($SkipStart -le 0 -and $SkipEnd -le 0) { return $Text }
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+
+    # Split on any line-ending style so this works regardless of what
+    # the source app puts on the clipboard.
+    $lines = $Text -split "`r`n|`r|`n"
+
+    # A trailing empty element shows up when the text ends with a line
+    # break - drop it so it isn't counted as an extra "row".
+    if ($lines.Length -gt 1 -and $lines[$lines.Length - 1] -eq '') {
+        $lines = $lines[0..($lines.Length - 2)]
+    }
+
+    $total = $lines.Length
+    $start = [Math]::Max(0, $SkipStart)
+    $end   = [Math]::Max(0, $SkipEnd)
+
+    if ($start + $end -ge $total) { return '' }
+
+    $keep = $lines[$start..($total - $end - 1)]
+    return ($keep -join [Environment]::NewLine)
 }
 
 # Small modal prompt shown each time a capture session is started.
@@ -477,6 +528,9 @@ Write-Host "  $ExitDisplay  -> quit"
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
 Write-Host "Config:     $ConfigPath"
+if ($SkipRowsStart -gt 0 -or $SkipRowsEnd -gt 0) {
+    Write-Host "Row filter: skipping first $SkipRowsStart and last $SkipRowsEnd row(s) of each capture"
+}
 Write-Host ""
 
 $global:CR_Running      = $false
@@ -513,7 +567,10 @@ $tickAction = {
                     try {
                         if ([System.Windows.Forms.Clipboard]::ContainsText()) {
                             $text = [System.Windows.Forms.Clipboard]::GetText()
-                            Add-Content -Path $global:CR_LogFile -Value $text
+                            $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
+                            if (-not [string]::IsNullOrEmpty($filtered)) {
+                                Add-Content -Path $global:CR_LogFile -Value $filtered
+                            }
                         }
                     } catch {
                         Write-Host "Clipboard read failed: $_" -ForegroundColor Yellow

@@ -10,6 +10,7 @@
    - The delay after Ctrl+C (before reading the clipboard)
    - The delay after the action key (before the next Ctrl+C)
    - The internal poll interval
+   - Rows to skip at the start/end of each captured chunk
    - The Toggle hotkey (start/stop capture)
    - The Exit hotkey (quit CommandRelay)
 
@@ -38,6 +39,8 @@ function Get-DefaultConfig {
         CopyDelayMs           = 150
         AfterActionKeyDelayMs = 150
         TimerTickMs           = 50
+        SkipRowsStart         = 0
+        SkipRowsEnd           = 0
         ActionKeyDisplay      = "F8"
         ActionKeyToken        = "{F8}"
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }
@@ -137,6 +140,12 @@ if (-not ($existing.PSObject.Properties.Name -contains 'AfterActionKeyDelayMs'))
     $fallbackDelay = if ($existing.PSObject.Properties.Name -contains 'AfterF8DelayMs') { $existing.AfterF8DelayMs } else { $defaultsForFallback.AfterActionKeyDelayMs }
     $existing | Add-Member -NotePropertyName AfterActionKeyDelayMs -NotePropertyValue $fallbackDelay
 }
+if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsStart')) {
+    $existing | Add-Member -NotePropertyName SkipRowsStart -NotePropertyValue $defaultsForFallback.SkipRowsStart
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsEnd')) {
+    $existing | Add-Member -NotePropertyName SkipRowsEnd -NotePropertyValue $defaultsForFallback.SkipRowsEnd
+}
 
 # Working copies of captured key/hotkey state
 $script:ToggleMods = [int]$existing.ToggleHotkey.Modifiers
@@ -152,7 +161,7 @@ $script:PreCaptureText = ""
 # ------------------------- Build the form -----------------------------
 $form                 = New-Object System.Windows.Forms.Form
 $form.Text            = "CommandRelay - Configuration"
-$form.Size            = New-Object System.Drawing.Size(480, 500)
+$form.Size            = New-Object System.Drawing.Size(480, 600)
 $form.StartPosition   = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox     = $false
@@ -262,10 +271,44 @@ $numTimerTick.Value = [int]$existing.TimerTickMs
 
 $grpTiming.Controls.AddRange(@($lblCopy, $numCopyDelay, $lblTick, $numTimerTick))
 
+# --- Row filtering group ---
+$grpRows = New-Object System.Windows.Forms.GroupBox
+$grpRows.Text = "Row filtering (skip rows in each captured chunk before saving)"
+$grpRows.Location = New-Object System.Drawing.Point(15, 285)
+$grpRows.Size = New-Object System.Drawing.Size(435, 90)
+
+$lblSkipStart = New-Object System.Windows.Forms.Label
+$lblSkipStart.Text = "Skip first N rows:"
+$lblSkipStart.Location = New-Object System.Drawing.Point(15, 28)
+$lblSkipStart.Size = New-Object System.Drawing.Size(300, 20)
+
+$numSkipStart = New-Object System.Windows.Forms.NumericUpDown
+$numSkipStart.Location = New-Object System.Drawing.Point(330, 25)
+$numSkipStart.Size = New-Object System.Drawing.Size(80, 22)
+$numSkipStart.Minimum = 0
+$numSkipStart.Maximum = 1000
+$numSkipStart.Increment = 1
+$numSkipStart.Value = [int]$existing.SkipRowsStart
+
+$lblSkipEnd = New-Object System.Windows.Forms.Label
+$lblSkipEnd.Text = "Skip last N rows:"
+$lblSkipEnd.Location = New-Object System.Drawing.Point(15, 58)
+$lblSkipEnd.Size = New-Object System.Drawing.Size(300, 20)
+
+$numSkipEnd = New-Object System.Windows.Forms.NumericUpDown
+$numSkipEnd.Location = New-Object System.Drawing.Point(330, 55)
+$numSkipEnd.Size = New-Object System.Drawing.Size(80, 22)
+$numSkipEnd.Minimum = 0
+$numSkipEnd.Maximum = 1000
+$numSkipEnd.Increment = 1
+$numSkipEnd.Value = [int]$existing.SkipRowsEnd
+
+$grpRows.Controls.AddRange(@($lblSkipStart, $numSkipStart, $lblSkipEnd, $numSkipEnd))
+
 # --- Hotkeys group ---
 $grpKeys = New-Object System.Windows.Forms.GroupBox
 $grpKeys.Text = "Global hotkeys (need at least one modifier)"
-$grpKeys.Location = New-Object System.Drawing.Point(15, 285)
+$grpKeys.Location = New-Object System.Drawing.Point(15, 385)
 $grpKeys.Size = New-Object System.Drawing.Size(435, 110)
 
 $lblToggle = New-Object System.Windows.Forms.Label
@@ -324,17 +367,17 @@ $grpKeys.Controls.AddRange(@($lblToggle, $txtToggle, $btnSetToggle, $lblExit, $t
 # --- Bottom buttons ---
 $btnSave = New-Object System.Windows.Forms.Button
 $btnSave.Text = "Save"
-$btnSave.Location = New-Object System.Drawing.Point(195, 405)
+$btnSave.Location = New-Object System.Drawing.Point(195, 505)
 $btnSave.Size = New-Object System.Drawing.Size(100, 32)
 
 $btnDefaults = New-Object System.Windows.Forms.Button
 $btnDefaults.Text = "Reset to Defaults"
-$btnDefaults.Location = New-Object System.Drawing.Point(15, 405)
+$btnDefaults.Location = New-Object System.Drawing.Point(15, 505)
 $btnDefaults.Size = New-Object System.Drawing.Size(130, 32)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(320, 405)
+$btnCancel.Location = New-Object System.Drawing.Point(320, 505)
 $btnCancel.Size = New-Object System.Drawing.Size(100, 32)
 
 $btnDefaults.Add_Click({
@@ -344,6 +387,8 @@ $btnDefaults.Add_Click({
     $numAfterActionDelay.Value = $defaults.AfterActionKeyDelayMs
     $numCopyDelay.Value       = $defaults.CopyDelayMs
     $numTimerTick.Value       = $defaults.TimerTickMs
+    $numSkipStart.Value       = $defaults.SkipRowsStart
+    $numSkipEnd.Value         = $defaults.SkipRowsEnd
     $txtToggle.Text           = $defaults.ToggleHotkey.Display
     $txtExit.Text             = $defaults.ExitHotkey.Display
     $script:ToggleMods        = [int]$defaults.ToggleHotkey.Modifiers
@@ -372,6 +417,8 @@ $btnSave.Add_Click({
         CopyDelayMs           = [int]$numCopyDelay.Value
         AfterActionKeyDelayMs = [int]$numAfterActionDelay.Value
         TimerTickMs           = [int]$numTimerTick.Value
+        SkipRowsStart         = [int]$numSkipStart.Value
+        SkipRowsEnd           = [int]$numSkipEnd.Value
         ActionKeyDisplay      = $txtAction.Text
         ActionKeyToken        = $script:ActionToken
         ToggleHotkey          = [pscustomobject]@{ Modifiers = $script:ToggleMods; Key = $script:ToggleKey; Display = $txtToggle.Text }
@@ -385,7 +432,7 @@ $btnSave.Add_Click({
         "Saved", 'OK', 'Information') | Out-Null
 })
 
-$form.Controls.AddRange(@($grpLog, $grpAction, $grpTiming, $grpKeys, $btnSave, $btnDefaults, $btnCancel))
+$form.Controls.AddRange(@($grpLog, $grpAction, $grpTiming, $grpRows, $grpKeys, $btnSave, $btnDefaults, $btnCancel))
 
 # ------------------------- Key-combo capture ---------------------------
 $form.Add_KeyDown({
