@@ -1,0 +1,18 @@
+﻿{
+    "LogFile":  "CapturedOutput.txt",
+    "CopyDelayMs":  150,
+    "AfterActionKeyDelayMs":  150,
+    "TimerTickMs":  50,
+    "ActionKeyDisplay":  "F5",
+    "ActionKeyToken":  "{F5}",
+    "ToggleHotkey":  {
+                         "Modifiers":  6,
+                         "Key":  80,
+                         "Display":  "Ctrl+Shift+P"
+                     },
+    "ExitHotkey":  {
+                       "Modifiers":  6,
+                       "Key":  81,
+                       "Display":  "Ctrl+Shift+Q"
+                   }
+}
