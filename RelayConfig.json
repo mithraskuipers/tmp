@@ -2,9 +2,9 @@
     "LogFile":  "CapturedOutput.txt",
     "CopyDelayMs":  250,
     "AfterActionKeyDelayMs":  250,
-    "TimerTickMs":  50,
-    "ActionKeyDisplay":  "F5",
-    "ActionKeyToken":  "{F5}",
+    "TimerTickMs":  250,
+    "ActionKeyDisplay":  "F8",
+    "ActionKeyToken":  "{F8}",
     "ToggleHotkey":  {
                          "Modifiers":  6,
                          "Key":  80,
