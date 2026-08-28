@@ -6,17 +6,34 @@
  (they work even while a different application is focused):
 
    [Toggle hotkey]  -> Start / stop the capture loop.
-                       When STARTING, a small prompt first asks you
-                       to type a filename - that becomes the .txt
-                       file the clipboard data gets appended to for
-                       this session. Cancelling the prompt cancels
-                       the start (nothing runs).
-                       While ON, it repeatedly:
-                         1. Sends CTRL+C to whatever window is focused
+                       When STARTING:
+                         1. You are asked to CLICK the window you
+                            want CommandRelay to operate on. A small
+                            status banner in the top-left corner of
+                            the screen tells you it's waiting for
+                            the click (press Esc to cancel instead).
+                         2. The window you clicked is identified and
+                            a Yes/No confirmation box shows its title.
+                            Press Enter (or click Yes) to accept it,
+                            or No to click a different window.
+                         3. You are asked for a filename - that
+                            becomes the .txt file the clipboard data
+                            gets appended to for this session.
+                            Cancelling this prompt cancels the start
+                            (nothing runs).
+                       Once running, it repeatedly:
+                         1. Brings the selected window to the
+                            foreground and sends it CTRL+C
                          2. Waits briefly for the clipboard to update
-                         3. Appends the clipboard text to the chosen file
-                         4. Sends the configured ACTION KEY (default F8)
+                         3. Appends the clipboard text to the chosen
+                            file
+                         4. Brings the selected window to the
+                            foreground again and sends the configured
+                            ACTION KEY (default F8)
                          5. Waits briefly, then repeats from step 1
+                       While running, a small status overlay in the
+                       top-left corner of the screen shows which of
+                       these steps is currently happening.
 
    [Exit hotkey]    -> Fully quits this script
 
@@ -30,12 +47,10 @@
  IMPORTANT:
    - Must run in STA mode (needed for clipboard access). The
      included .bat launcher already starts it with -STA.
-   - Make sure the OTHER application is the focused/active window
-     before you press the toggle hotkey - keystrokes go to whatever
-     window currently has focus, not to this script. When the
-     filename prompt appears, focus moves to it temporarily; typing
-     a name and pressing Enter (or clicking Start Capture) hands
-     focus back and the loop begins.
+   - Because the loop now re-focuses your chosen window itself
+     before every action, you no longer have to babysit window
+     focus by hand - just make sure that window still exists.
+     If it gets closed, the capture stops automatically.
 =====================================================================
 #>
 
@@ -108,101 +123,50 @@ $ExitDisplay     = [string]$Config.ExitHotkey.Display
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Must be set before ANY Windows Forms control is created on this thread
-# (including the filename-prompt dialog and the hidden hotkey form below) -
-# .NET throws "Thread exception mode cannot be changed once any Controls
-# are created on the thread" if this runs any later.
-[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
-[System.Windows.Forms.Application]::add_ThreadException({
-    param($sender, $e)
-    Write-Host "[CommandRelay] Unhandled UI exception (recovered): $($e.Exception.Message)" -ForegroundColor Yellow
-})
-
-# Minimize this script's own console window. It sends Ctrl+C to whatever
-# window currently has focus - if this console itself ever ends up
-# focused (easy to do by accident, e.g. after an Alt-Tab), that Ctrl+C
-# goes to PowerShell instead of your target app, which makes PowerShell
-# abort the running pipeline ("The pipeline has been stopped."). Keeping
-# this window minimized makes that far less likely to happen.
-try {
-    Add-Type -Name Win32ShowWindow -Namespace CommandRelayNative -MemberDefinition @'
-[DllImport("user32.dll")]
-public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-'@
-    $consoleHandle = (Get-Process -Id $PID).MainWindowHandle
-    if ($consoleHandle -ne [IntPtr]::Zero) {
-        [CommandRelayNative.Win32ShowWindow]::ShowWindowAsync($consoleHandle, 6) | Out-Null  # 6 = SW_MINIMIZE
-    }
-} catch {
-    # Non-critical - if this fails for any reason, just carry on.
-}
-
-function Get-SafeFileName {
-    param([string]$Name)
-    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($ch in $Name.ToCharArray()) {
-        if ($invalid -contains $ch) { [void]$sb.Append('_') } else { [void]$sb.Append($ch) }
-    }
-    return $sb.ToString()
-}
-
-# Small modal prompt shown each time a capture session is started.
-# Returns the trimmed filename the user typed, or $null if cancelled.
-function Show-FilenamePrompt {
-    param([string]$DefaultName)
-
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text            = "Start Capture"
-    $dlg.Size            = New-Object System.Drawing.Size(360, 150)
-    $dlg.StartPosition   = 'CenterScreen'
-    $dlg.FormBorderStyle = 'FixedDialog'
-    $dlg.MaximizeBox     = $false
-    $dlg.MinimizeBox     = $false
-    $dlg.TopMost         = $true
-
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Enter a filename for this capture (no extension needed):"
-    $lbl.Location = New-Object System.Drawing.Point(15, 15)
-    $lbl.Size = New-Object System.Drawing.Size(320, 20)
-
-    $txt = New-Object System.Windows.Forms.TextBox
-    $txt.Location = New-Object System.Drawing.Point(15, 40)
-    $txt.Size = New-Object System.Drawing.Size(315, 22)
-    $txt.Text = $DefaultName
-    $txt.SelectAll()
-
-    $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = "Start Capture"
-    $btnOk.Location = New-Object System.Drawing.Point(150, 75)
-    $btnOk.Size = New-Object System.Drawing.Size(115, 28)
-    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Cancel"
-    $btnCancel.Location = New-Object System.Drawing.Point(270, 75)
-    $btnCancel.Size = New-Object System.Drawing.Size(70, 28)
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-
-    $dlg.AcceptButton = $btnOk
-    $dlg.CancelButton = $btnCancel
-    $dlg.Controls.AddRange(@($lbl, $txt, $btnOk, $btnCancel))
-    $dlg.Add_Shown({ $txt.Focus(); $txt.SelectAll() })
-
-    $result = $dlg.ShowDialog()
-    $dlg.Dispose()
-
-    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-
-    $name = $txt.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($name)) { return $null }
-    return $name
-}
-
+# ---- Native/custom types: window-focus helpers, the hidden hotkey host
+# window, and the top-left status overlay window. All compiled in one
+# block so they share the same assembly. ----
 $formSource = @"
 using System;
+using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
+
+public static class Win32
+{
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(System.Drawing.Point pt);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
 
 public class HotkeyForm : Form
 {
@@ -226,9 +190,126 @@ public class HotkeyForm : Form
         base.WndProc(ref m);
     }
 }
+
+public class StatusOverlay : Form
+{
+    protected override bool ShowWithoutActivation
+    {
+        get { return true; }
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            const int WS_EX_NOACTIVATE = 0x08000000;
+            const int WS_EX_TOOLWINDOW = 0x00000080;
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            return cp;
+        }
+    }
+}
 "@
 
-Add-Type -TypeDefinition $formSource -ReferencedAssemblies "System.Windows.Forms","System.Drawing"
+Add-Type -TypeDefinition $formSource -ReferencedAssemblies "System.Windows.Forms", "System.Drawing"
+
+# Must be set before ANY Windows Forms control is created on this thread
+# (including the filename-prompt dialog and the hidden hotkey form below) -
+# .NET throws "Thread exception mode cannot be changed once any Controls
+# are created on the thread" if this runs any later. Defining the types
+# above does not create any controls, so this can safely come after them.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $e)
+    Write-Host "[CommandRelay] Unhandled UI exception (recovered): $($e.Exception.Message)" -ForegroundColor Yellow
+})
+
+# Minimize this script's own console window. It sends Ctrl+C to whatever
+# window currently has focus - if this console itself ever ends up
+# focused (easy to do by accident, e.g. after an Alt-Tab), that Ctrl+C
+# goes to PowerShell instead of your target app, which makes PowerShell
+# abort the running pipeline ("The pipeline has been stopped."). Keeping
+# this window minimized makes that far less likely to happen.
+try {
+    $consoleHandle = (Get-Process -Id $PID).MainWindowHandle
+    if ($consoleHandle -ne [IntPtr]::Zero) {
+        [Win32]::ShowWindowAsync($consoleHandle, 6) | Out-Null  # 6 = SW_MINIMIZE
+    }
+} catch {
+    # Non-critical - if this fails for any reason, just carry on.
+}
+
+function Get-SafeFileName {
+    param([string]$Name)
+    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Name.ToCharArray()) {
+        if ($invalid -contains $ch) { [void]$sb.Append('_') } else { [void]$sb.Append($ch) }
+    }
+    return $sb.ToString()
+}
+
+# Small modal prompt shown each time a capture session is started.
+# Returns the trimmed filename the user typed, or $null if cancelled.
+function Show-FilenamePrompt {
+    param(
+        [string]$DefaultName,
+        [string]$TargetTitle
+    )
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = "Start Capture"
+    $dlg.Size            = New-Object System.Drawing.Size(380, 160)
+    $dlg.StartPosition   = 'CenterScreen'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.TopMost         = $true
+
+    $lblTarget = New-Object System.Windows.Forms.Label
+    $lblTarget.Text = "Target window: $TargetTitle"
+    $lblTarget.Location = New-Object System.Drawing.Point(15, 12)
+    $lblTarget.Size = New-Object System.Drawing.Size(340, 18)
+    $lblTarget.Font = New-Object System.Drawing.Font($lblTarget.Font, [System.Drawing.FontStyle]::Italic)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Enter a filename for this capture (no extension needed):"
+    $lbl.Location = New-Object System.Drawing.Point(15, 38)
+    $lbl.Size = New-Object System.Drawing.Size(340, 20)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(15, 62)
+    $txt.Size = New-Object System.Drawing.Size(335, 22)
+    $txt.Text = $DefaultName
+    $txt.SelectAll()
+
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = "Start Capture"
+    $btnOk.Location = New-Object System.Drawing.Point(170, 98)
+    $btnOk.Size = New-Object System.Drawing.Size(115, 28)
+    $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Location = New-Object System.Drawing.Point(290, 98)
+    $btnCancel.Size = New-Object System.Drawing.Size(70, 28)
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+    $dlg.AcceptButton = $btnOk
+    $dlg.CancelButton = $btnCancel
+    $dlg.Controls.AddRange(@($lblTarget, $lbl, $txt, $btnOk, $btnCancel))
+    $dlg.Add_Shown({ $txt.Focus(); $txt.SelectAll() })
+
+    $result = $dlg.ShowDialog()
+    $dlg.Dispose()
+
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+
+    $name = $txt.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) { return $null }
+    return $name
+}
 
 # Invisible/off-screen host window - only needed so Windows has something
 # to deliver the WM_HOTKEY messages to.
@@ -252,18 +333,159 @@ if (-not [HotkeyForm]::RegisterHotKey($FormHandle, $ExitHotkeyId, $ExitModifiers
     Write-Host "Failed to register the EXIT hotkey ($ExitDisplay). It may already be in use by another app." -ForegroundColor Red
 }
 
+# ---- Top-left status overlay: a tiny always-on-top banner that never
+# steals keyboard focus (StatusOverlay overrides ShowWithoutActivation
+# and adds WS_EX_NOACTIVATE), so showing/updating it never interrupts
+# whatever window the automation is currently sending keys to. ----
+$statusForm = New-Object StatusOverlay
+$statusForm.FormBorderStyle = 'None'
+$statusForm.StartPosition   = 'Manual'
+$statusForm.ShowInTaskbar   = $false
+$statusForm.TopMost         = $true
+$statusForm.BackColor       = [System.Drawing.Color]::Black
+$statusForm.Opacity         = 0.85
+$statusForm.Size            = New-Object System.Drawing.Size(320, 32)
+
+$screenArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$statusForm.Location = New-Object System.Drawing.Point(($screenArea.Left + 8), ($screenArea.Top + 8))
+
+$statusLabel = New-Object System.Windows.Forms.Label
+$statusLabel.Dock      = 'Fill'
+$statusLabel.TextAlign = 'MiddleCenter'
+$statusLabel.ForeColor = [System.Drawing.Color]::Lime
+$statusLabel.Font      = New-Object System.Drawing.Font('Consolas', 9, [System.Drawing.FontStyle]::Bold)
+$statusLabel.Text      = ''
+$statusForm.Controls.Add($statusLabel)
+
+# Force the overlay's handle to exist now (so Select-TargetWindow can
+# compare clicked windows against it) without actually showing it yet.
+[void]$statusForm.Handle
+$statusForm.Hide()
+
+function Set-RelayStatus {
+    param(
+        [string]$Text,
+        [System.Drawing.Color]$Color = [System.Drawing.Color]::Lime
+    )
+    $statusLabel.ForeColor = $Color
+    $statusLabel.Text      = $Text
+    if (-not $statusForm.Visible) { $statusForm.Show() }
+}
+
+function Hide-RelayStatus {
+    $statusForm.Hide()
+}
+
+# ---- Window picking: user clicks a window, we identify it, then a
+# Yes/No dialog (Enter = Yes) confirms it before anything starts. ----
+function Select-TargetWindow {
+    Set-RelayStatus "Click the target window... (Esc to cancel)" ([System.Drawing.Color]::Yellow)
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Cross
+
+    $VK_LBUTTON = 0x01
+    $VK_ESCAPE  = 0x1B
+    $picked     = [IntPtr]::Zero
+
+    while ($true) {
+        Start-Sleep -Milliseconds 15
+        [System.Windows.Forms.Application]::DoEvents()
+
+        if (([Win32]::GetAsyncKeyState($VK_ESCAPE) -band 0x8000) -ne 0) {
+            $picked = [IntPtr]::Zero
+            break
+        }
+
+        if (([Win32]::GetAsyncKeyState($VK_LBUTTON) -band 0x8000) -ne 0) {
+            $pt   = [System.Windows.Forms.Cursor]::Position
+            $hwnd = [Win32]::WindowFromPoint($pt)
+            $root = [Win32]::GetAncestor($hwnd, [uint32]2)   # GA_ROOT
+
+            # Wait for the click to release before deciding anything, so
+            # only one deliberate click is ever consumed here.
+            while (([Win32]::GetAsyncKeyState($VK_LBUTTON) -band 0x8000) -ne 0) {
+                Start-Sleep -Milliseconds 10
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+
+            if ($root -eq [IntPtr]::Zero -or $root -eq $statusForm.Handle) {
+                continue   # clicked on our own overlay or nothing useful - keep waiting
+            }
+            $picked = $root
+            break
+        }
+    }
+
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+
+    if ($picked -eq [IntPtr]::Zero) { return $null }
+
+    $sb = New-Object System.Text.StringBuilder 256
+    [void][Win32]::GetWindowText($picked, $sb, $sb.Capacity)
+    $title = $sb.ToString()
+    if ([string]::IsNullOrWhiteSpace($title)) { $title = "(untitled window)" }
+
+    return [pscustomobject]@{ Handle = $picked; Title = $title }
+}
+
+function Confirm-TargetWindow {
+    param([string]$Title)
+    $msg = "Target window identified:`n`n$Title`n`nIs this correct?"
+    $result = [System.Windows.Forms.MessageBox]::Show(
+        $msg,
+        "Confirm Target Window",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button1
+    )
+    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+# Brings the target window to the foreground before an automated key is
+# sent to it. Returns $false if the window no longer exists.
+function Set-RelayForeground {
+    param([IntPtr]$Handle)
+
+    if ($Handle -eq [IntPtr]::Zero) { return $true }
+    if (-not [Win32]::IsWindow($Handle)) { return $false }
+
+    if ([Win32]::IsIconic($Handle)) {
+        [void][Win32]::ShowWindow($Handle, 9)   # SW_RESTORE
+    }
+
+    if ([Win32]::GetForegroundWindow() -ne $Handle) {
+        [void][Win32]::SetForegroundWindow($Handle)
+
+        if ([Win32]::GetForegroundWindow() -ne $Handle) {
+            # Windows normally blocks a background process from stealing
+            # foreground focus outright. Tapping Alt first is a long-
+            # standing, widely used workaround that "unlocks"
+            # SetForegroundWindow for the very next call.
+            [Win32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)  # Alt down
+            [Win32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)  # Alt up
+            [void][Win32]::SetForegroundWindow($Handle)
+        }
+    }
+
+    Start-Sleep -Milliseconds 30
+    return $true
+}
+
 Write-Host "CommandRelay is running." -ForegroundColor White
-Write-Host "  $ToggleDisplay  -> start/stop the capture loop (you'll be asked for a filename each time you start)"
+Write-Host "  $ToggleDisplay  -> start/stop the capture loop" -ForegroundColor White
+Write-Host "                    (click a window to target, confirm it, then name the file)"
 Write-Host "  $ExitDisplay  -> quit"
 Write-Host "Action key: $ActionKeyDisplay"
 Write-Host "Log folder: $LogDir"
 Write-Host "Config:     $ConfigPath"
 Write-Host ""
 
-$global:CR_Running   = $false
-$global:CR_State     = 'Idle'   # Idle -> PostCopy -> PostAction -> Idle ...
-$global:CR_ElapsedMs = 0
-$global:CR_LogFile   = $DefaultLogFile
+$global:CR_Running      = $false
+$global:CR_Selecting    = $false
+$global:CR_State        = 'Idle'   # Idle -> PostCopy -> PostAction -> Idle ...
+$global:CR_ElapsedMs    = 0
+$global:CR_LogFile      = $DefaultLogFile
+$global:CR_TargetHandle = [IntPtr]::Zero
+$global:CR_TargetTitle  = ''
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -274,6 +496,13 @@ $tickAction = {
     try {
         switch ($global:CR_State) {
             'Idle' {
+                if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                    Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
+                    $global:CR_Running = $false
+                    Hide-RelayStatus
+                    return
+                }
+                Set-RelayStatus "-> $($global:CR_TargetTitle) : Copying (Ctrl+C)" ([System.Drawing.Color]::Lime)
                 [System.Windows.Forms.SendKeys]::SendWait('^c')
                 $global:CR_State     = 'PostCopy'
                 $global:CR_ElapsedMs = 0
@@ -289,6 +518,14 @@ $tickAction = {
                     } catch {
                         Write-Host "Clipboard read failed: $_" -ForegroundColor Yellow
                     }
+
+                    if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
+                        Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
+                        $global:CR_Running = $false
+                        Hide-RelayStatus
+                        return
+                    }
+                    Set-RelayStatus "-> $($global:CR_TargetTitle) : Sending $ActionKeyDisplay" ([System.Drawing.Color]::Orange)
                     [System.Windows.Forms.SendKeys]::SendWait($ActionKeyToken)
                     $global:CR_State     = 'PostAction'
                     $global:CR_ElapsedMs = 0
@@ -319,23 +556,54 @@ $hotkeyAction = {
     param($sender, $id)
 
     if ($id -eq $ToggleHotkeyId) {
-        if (-not $global:CR_Running) {
-            # Starting a new session - ask for a filename first.
-            $name = Show-FilenamePrompt -DefaultName $DefaultBaseName
-            if ($null -eq $name) {
-                Write-Host "[CommandRelay] Capture start cancelled." -ForegroundColor Yellow
-                return
-            }
-            $safeName = Get-SafeFileName $name
-            if (-not $safeName.ToLower().EndsWith('.txt')) { $safeName += '.txt' }
+        if ($global:CR_Selecting) { return }   # ignore repeat presses mid-selection
 
-            $global:CR_LogFile   = Join-Path $LogDir $safeName
-            $global:CR_Running   = $true
-            $global:CR_State     = 'Idle'
-            $global:CR_ElapsedMs = 0
-            Write-Host "[CommandRelay] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
+        if (-not $global:CR_Running) {
+            $global:CR_Selecting = $true
+            try {
+                # 1. Click-to-pick the target window, with a Yes/No
+                #    identify-and-confirm step (Enter = Yes).
+                $target = $null
+                while ($true) {
+                    $picked = Select-TargetWindow
+                    if ($null -eq $picked) {
+                        Write-Host "[CommandRelay] Capture start cancelled (no window selected)." -ForegroundColor Yellow
+                        Hide-RelayStatus
+                        return
+                    }
+                    if (Confirm-TargetWindow -Title $picked.Title) {
+                        $target = $picked
+                        break
+                    }
+                    Write-Host "[CommandRelay] Selection rejected - click the correct window." -ForegroundColor Yellow
+                }
+
+                # 2. Ask for the filename, same as before, then start
+                #    right away once Enter is pressed.
+                $name = Show-FilenamePrompt -DefaultName $DefaultBaseName -TargetTitle $target.Title
+                if ($null -eq $name) {
+                    Write-Host "[CommandRelay] Capture start cancelled." -ForegroundColor Yellow
+                    Hide-RelayStatus
+                    return
+                }
+                $safeName = Get-SafeFileName $name
+                if (-not $safeName.ToLower().EndsWith('.txt')) { $safeName += '.txt' }
+
+                $global:CR_LogFile      = Join-Path $LogDir $safeName
+                $global:CR_TargetHandle = $target.Handle
+                $global:CR_TargetTitle  = $target.Title
+                $global:CR_Running      = $true
+                $global:CR_State        = 'Idle'
+                $global:CR_ElapsedMs    = 0
+                Write-Host "[CommandRelay] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
+                Write-Host "[CommandRelay] Target window -> $($target.Title)" -ForegroundColor Green
+                Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)
+            } finally {
+                $global:CR_Selecting = $false
+            }
         } else {
             $global:CR_Running = $false
+            Hide-RelayStatus
             Write-Host "[CommandRelay] Capture STOPPED" -ForegroundColor Cyan
         }
     }
@@ -353,4 +621,5 @@ $form.Add_HotkeyPressed($hotkeyAction)
 $timer.Stop()
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ToggleHotkeyId) | Out-Null
 [HotkeyForm]::UnregisterHotKey($FormHandle, $ExitHotkeyId)   | Out-Null
+$statusForm.Dispose()
 Write-Host "CommandRelay stopped."
