@@ -11,6 +11,9 @@
    - The delay after the action key (before the next Ctrl+C)
    - The internal poll interval
    - Rows to skip at the start/end of each captured chunk
+   - Duplicate-capture detection (pause & ask when back-to-back
+     captures come back almost identical, e.g. the target app has
+     stopped producing new data)
    - The Toggle hotkey (start/stop capture)
    - The Exit hotkey (quit CommandRelay)
 
@@ -43,6 +46,8 @@ function Get-DefaultConfig {
         SkipRowsEnd           = 0
         ActionKeyDisplay      = "F8"
         ActionKeyToken        = "{F8}"
+        DupDetectEnabled      = $true
+        DupDetectThreshold    = 0.995
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X" }
     }
@@ -146,6 +151,12 @@ if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsStart')) {
 if (-not ($existing.PSObject.Properties.Name -contains 'SkipRowsEnd')) {
     $existing | Add-Member -NotePropertyName SkipRowsEnd -NotePropertyValue $defaultsForFallback.SkipRowsEnd
 }
+if (-not ($existing.PSObject.Properties.Name -contains 'DupDetectEnabled')) {
+    $existing | Add-Member -NotePropertyName DupDetectEnabled -NotePropertyValue $defaultsForFallback.DupDetectEnabled
+}
+if (-not ($existing.PSObject.Properties.Name -contains 'DupDetectThreshold')) {
+    $existing | Add-Member -NotePropertyName DupDetectThreshold -NotePropertyValue $defaultsForFallback.DupDetectThreshold
+}
 
 # Working copies of captured key/hotkey state
 $script:ToggleMods = [int]$existing.ToggleHotkey.Modifiers
@@ -161,7 +172,7 @@ $script:PreCaptureText = ""
 # ------------------------- Build the form -----------------------------
 $form                 = New-Object System.Windows.Forms.Form
 $form.Text            = "CommandRelay - Configuration"
-$form.Size            = New-Object System.Drawing.Size(480, 600)
+$form.Size            = New-Object System.Drawing.Size(480, 690)
 $form.StartPosition   = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox     = $false
@@ -305,10 +316,47 @@ $numSkipEnd.Value = [int]$existing.SkipRowsEnd
 
 $grpRows.Controls.AddRange(@($lblSkipStart, $numSkipStart, $lblSkipEnd, $numSkipEnd))
 
+# --- Duplicate-capture detection group ---
+$grpDup = New-Object System.Windows.Forms.GroupBox
+$grpDup.Text = "Duplicate-capture detection"
+$grpDup.Location = New-Object System.Drawing.Point(15, 385)
+$grpDup.Size = New-Object System.Drawing.Size(435, 80)
+
+$chkDupDetect = New-Object System.Windows.Forms.CheckBox
+$chkDupDetect.Text = "Pause and ask when back-to-back captures are nearly identical"
+$chkDupDetect.Location = New-Object System.Drawing.Point(15, 25)
+$chkDupDetect.Size = New-Object System.Drawing.Size(405, 20)
+$chkDupDetect.Checked = [bool]$existing.DupDetectEnabled
+
+$lblDupThreshold = New-Object System.Windows.Forms.Label
+$lblDupThreshold.Text = "Similarity threshold to trigger the pause (%):"
+$lblDupThreshold.Location = New-Object System.Drawing.Point(15, 53)
+$lblDupThreshold.Size = New-Object System.Drawing.Size(300, 20)
+
+$numDupThreshold = New-Object System.Windows.Forms.NumericUpDown
+$numDupThreshold.Location = New-Object System.Drawing.Point(330, 50)
+$numDupThreshold.Size = New-Object System.Drawing.Size(80, 22)
+$numDupThreshold.DecimalPlaces = 2
+$numDupThreshold.Minimum = 50
+$numDupThreshold.Maximum = 100
+$numDupThreshold.Increment = 0.1
+$rawThreshold = [double]$existing.DupDetectThreshold
+if ($rawThreshold -le 1) { $rawThreshold = $rawThreshold * 100 }   # stored as a fraction (0.995) -> show as %
+$numDupThreshold.Value = [Math]::Round([Math]::Min([Math]::Max($rawThreshold, 50), 100), 2)
+
+$lblDupThreshold.Enabled = $chkDupDetect.Checked
+$numDupThreshold.Enabled = $chkDupDetect.Checked
+$chkDupDetect.Add_CheckedChanged({
+    $lblDupThreshold.Enabled = $chkDupDetect.Checked
+    $numDupThreshold.Enabled = $chkDupDetect.Checked
+})
+
+$grpDup.Controls.AddRange(@($chkDupDetect, $lblDupThreshold, $numDupThreshold))
+
 # --- Hotkeys group ---
 $grpKeys = New-Object System.Windows.Forms.GroupBox
 $grpKeys.Text = "Global hotkeys (need at least one modifier)"
-$grpKeys.Location = New-Object System.Drawing.Point(15, 385)
+$grpKeys.Location = New-Object System.Drawing.Point(15, 475)
 $grpKeys.Size = New-Object System.Drawing.Size(435, 110)
 
 $lblToggle = New-Object System.Windows.Forms.Label
@@ -367,17 +415,17 @@ $grpKeys.Controls.AddRange(@($lblToggle, $txtToggle, $btnSetToggle, $lblExit, $t
 # --- Bottom buttons ---
 $btnSave = New-Object System.Windows.Forms.Button
 $btnSave.Text = "Save"
-$btnSave.Location = New-Object System.Drawing.Point(195, 505)
+$btnSave.Location = New-Object System.Drawing.Point(195, 595)
 $btnSave.Size = New-Object System.Drawing.Size(100, 32)
 
 $btnDefaults = New-Object System.Windows.Forms.Button
 $btnDefaults.Text = "Reset to Defaults"
-$btnDefaults.Location = New-Object System.Drawing.Point(15, 505)
+$btnDefaults.Location = New-Object System.Drawing.Point(15, 595)
 $btnDefaults.Size = New-Object System.Drawing.Size(130, 32)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = "Cancel"
-$btnCancel.Location = New-Object System.Drawing.Point(320, 505)
+$btnCancel.Location = New-Object System.Drawing.Point(320, 595)
 $btnCancel.Size = New-Object System.Drawing.Size(100, 32)
 
 $btnDefaults.Add_Click({
@@ -389,6 +437,8 @@ $btnDefaults.Add_Click({
     $numTimerTick.Value       = $defaults.TimerTickMs
     $numSkipStart.Value       = $defaults.SkipRowsStart
     $numSkipEnd.Value         = $defaults.SkipRowsEnd
+    $chkDupDetect.Checked     = $defaults.DupDetectEnabled
+    $numDupThreshold.Value    = [Math]::Round($defaults.DupDetectThreshold * 100, 2)
     $txtToggle.Text           = $defaults.ToggleHotkey.Display
     $txtExit.Text             = $defaults.ExitHotkey.Display
     $script:ToggleMods        = [int]$defaults.ToggleHotkey.Modifiers
@@ -421,6 +471,8 @@ $btnSave.Add_Click({
         SkipRowsEnd           = [int]$numSkipEnd.Value
         ActionKeyDisplay      = $txtAction.Text
         ActionKeyToken        = $script:ActionToken
+        DupDetectEnabled      = [bool]$chkDupDetect.Checked
+        DupDetectThreshold    = [double]($numDupThreshold.Value / 100)
         ToggleHotkey          = [pscustomobject]@{ Modifiers = $script:ToggleMods; Key = $script:ToggleKey; Display = $txtToggle.Text }
         ExitHotkey            = [pscustomobject]@{ Modifiers = $script:ExitMods;   Key = $script:ExitKey;   Display = $txtExit.Text }
     }
@@ -432,7 +484,7 @@ $btnSave.Add_Click({
         "Saved", 'OK', 'Information') | Out-Null
 })
 
-$form.Controls.AddRange(@($grpLog, $grpAction, $grpTiming, $grpRows, $grpKeys, $btnSave, $btnDefaults, $btnCancel))
+$form.Controls.AddRange(@($grpLog, $grpAction, $grpTiming, $grpRows, $grpDup, $grpKeys, $btnSave, $btnDefaults, $btnCancel))
 
 # ------------------------- Key-combo capture ---------------------------
 $form.Add_KeyDown({

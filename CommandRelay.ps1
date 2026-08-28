@@ -37,14 +37,23 @@
 
    [Exit hotkey]    -> Fully quits this script
 
+ Duplicate-capture protection: each capture is compared to the one
+ immediately before it. If they come back 99.5% identical (default;
+ configurable), that usually means the target app has stopped handing
+ back new data (e.g. you've reached the end of a list). The loop pauses,
+ shows a Continue / Stop Capture dialog, and waits for you - it will not
+ silently keep looping and appending duplicate content forever. Choosing
+ Continue won't re-prompt every cycle; it only asks again once new,
+ different content shows up and then goes stale again.
+
  All settings - default log location, timing, the action key, both
- hotkeys, and how many rows to skip at the start/end of each capture
- (e.g. to drop a repeated header/footer row a target app always
- copies along with the data) - are read from RelayConfig.json (same
- folder as this script). Use ConfigGUI.ps1 (or the
- "ConfigureCommandRelay.bat" launcher) to change them without editing
- this file. If RelayConfig.json doesn't exist yet, a default one is
- created automatically on first run.
+ hotkeys, duplicate-capture detection, and how many rows to skip at the
+ start/end of each capture (e.g. to drop a repeated header/footer row a
+ target app always copies along with the data) - are read from
+ RelayConfig.json (same folder as this script). Use ConfigGUI.ps1 (or
+ the "ConfigureCommandRelay.bat" launcher) to change them without
+ editing this file. If RelayConfig.json doesn't exist yet, a default
+ one is created automatically on first run.
 
  IMPORTANT:
    - Must run in STA mode (needed for clipboard access). The
@@ -68,6 +77,8 @@ function Get-DefaultConfig {
         SkipRowsEnd           = 0
         ActionKeyDisplay      = "F8"
         ActionKeyToken        = "{F8}"
+        DupDetectEnabled      = $true
+        DupDetectThreshold    = 0.995   # 99.5%
         ToggleHotkey          = [pscustomobject]@{ Modifiers = 3; Key = 0x43; Display = "Ctrl+Alt+C" }  # Ctrl+Alt+C
         ExitHotkey            = [pscustomobject]@{ Modifiers = 3; Key = 0x58; Display = "Ctrl+Alt+X" }  # Ctrl+Alt+X
     }
@@ -123,6 +134,18 @@ if ($Config.PSObject.Properties.Name -contains 'SkipRowsEnd') {
 } else {
     $SkipRowsEnd = 0
 }
+
+if ($Config.PSObject.Properties.Name -contains 'DupDetectEnabled') {
+    $DupDetectEnabled = [bool]$Config.DupDetectEnabled
+} else {
+    $DupDetectEnabled = $true
+}
+if ($Config.PSObject.Properties.Name -contains 'DupDetectThreshold') {
+    $DupDetectThreshold = [double]$Config.DupDetectThreshold
+} else {
+    $DupDetectThreshold = 0.995
+}
+if ($DupDetectThreshold -gt 1) { $DupDetectThreshold = $DupDetectThreshold / 100.0 }  # tolerate "99.5" as well as "0.995"
 
 $ToggleHotkeyId  = 1
 $ToggleModifiers = [int]$Config.ToggleHotkey.Modifiers
@@ -299,6 +322,45 @@ function Get-FilteredCaptureText {
 
     $keep = $lines[$start..($total - $end - 1)]
     return ($keep -join [Environment]::NewLine)
+}
+
+# Compares two captured text blocks and returns how much they overlap, as
+# a fraction from 0.0 (nothing in common) to 1.0 (identical). Works line
+# by line (matching the row-oriented nature of the row-skip feature above)
+# using a multiset intersection, so it stays accurate even if a couple of
+# rows shifted position between captures, and stays fast regardless of
+# capture size. Used to detect a capture loop that's stuck copying the
+# same content over and over (e.g. the target app reached the end of its
+# data and stopped producing anything new).
+function Get-TextSimilarity {
+    param(
+        [string]$A,
+        [string]$B
+    )
+
+    if ([string]::IsNullOrEmpty($A) -and [string]::IsNullOrEmpty($B)) { return 1.0 }
+    if ([string]::IsNullOrEmpty($A) -or [string]::IsNullOrEmpty($B)) { return 0.0 }
+    if ($A -eq $B) { return 1.0 }
+
+    $linesA = $A -split "`r`n|`r|`n"
+    $linesB = $B -split "`r`n|`r|`n"
+
+    $countA = @{}
+    foreach ($l in $linesA) {
+        if ($countA.ContainsKey($l)) { $countA[$l]++ } else { $countA[$l] = 1 }
+    }
+
+    $matched = 0
+    foreach ($l in $linesB) {
+        if ($countA.ContainsKey($l) -and $countA[$l] -gt 0) {
+            $countA[$l]--
+            $matched++
+        }
+    }
+
+    $totalMax = [Math]::Max($linesA.Length, $linesB.Length)
+    if ($totalMax -eq 0) { return 1.0 }
+    return [double]$matched / [double]$totalMax
 }
 
 # Small modal prompt shown each time a capture session is started.
@@ -491,6 +553,53 @@ function Confirm-TargetWindow {
     return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+# Shown when back-to-back captures come back nearly identical. Returns
+# 'Continue' or 'Stop'.
+function Show-DuplicateCapturePrompt {
+    param(
+        [double]$Similarity,
+        [string]$TargetTitle
+    )
+
+    $pct = [Math]::Round($Similarity * 100, 2)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = "Duplicate Capture Detected"
+    $dlg.Size            = New-Object System.Drawing.Size(430, 190)
+    $dlg.StartPosition   = 'CenterScreen'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.TopMost         = $true
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "The last two captures from `"$TargetTitle`" are $pct% identical.`n`nThis usually means the target app has stopped producing new data (e.g. you've reached the end of a list). Continue capturing anyway, or stop here?"
+    $lbl.Location = New-Object System.Drawing.Point(15, 12)
+    $lbl.Size = New-Object System.Drawing.Size(395, 100)
+
+    $btnContinue = New-Object System.Windows.Forms.Button
+    $btnContinue.Text = "Continue"
+    $btnContinue.Location = New-Object System.Drawing.Point(140, 118)
+    $btnContinue.Size = New-Object System.Drawing.Size(125, 30)
+    $btnContinue.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+
+    $btnStop = New-Object System.Windows.Forms.Button
+    $btnStop.Text = "Stop Capture"
+    $btnStop.Location = New-Object System.Drawing.Point(275, 118)
+    $btnStop.Size = New-Object System.Drawing.Size(125, 30)
+    $btnStop.DialogResult = [System.Windows.Forms.DialogResult]::No
+
+    $dlg.AcceptButton = $btnContinue
+    $dlg.CancelButton = $btnStop
+    $dlg.Controls.AddRange(@($lbl, $btnContinue, $btnStop))
+
+    $result = $dlg.ShowDialog()
+    $dlg.Dispose()
+
+    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { return 'Continue' }
+    return 'Stop'
+}
+
 # Brings the target window to the foreground before an automated key is
 # sent to it. Returns $false if the window no longer exists.
 function Set-RelayForeground {
@@ -531,6 +640,11 @@ Write-Host "Config:     $ConfigPath"
 if ($SkipRowsStart -gt 0 -or $SkipRowsEnd -gt 0) {
     Write-Host "Row filter: skipping first $SkipRowsStart and last $SkipRowsEnd row(s) of each capture"
 }
+if ($DupDetectEnabled) {
+    Write-Host "Duplicate-capture protection: ON (pauses to ask at $([Math]::Round($DupDetectThreshold * 100, 2))% overlap with the previous capture)"
+} else {
+    Write-Host "Duplicate-capture protection: OFF"
+}
 Write-Host ""
 
 $global:CR_Running      = $false
@@ -540,6 +654,8 @@ $global:CR_ElapsedMs    = 0
 $global:CR_LogFile      = $DefaultLogFile
 $global:CR_TargetHandle = [IntPtr]::Zero
 $global:CR_TargetTitle  = ''
+$global:CR_PrevCaptureText     = $null
+$global:CR_SuppressDupWarning  = $false
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = $TimerTickMs
@@ -564,17 +680,59 @@ $tickAction = {
             'PostCopy' {
                 $global:CR_ElapsedMs += $TimerTickMs
                 if ($global:CR_ElapsedMs -ge $CopyDelayMs) {
+                    $stopRequested = $false
                     try {
                         if ([System.Windows.Forms.Clipboard]::ContainsText()) {
                             $text = [System.Windows.Forms.Clipboard]::GetText()
-                            $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
-                            if (-not [string]::IsNullOrEmpty($filtered)) {
-                                Add-Content -Path $global:CR_LogFile -Value $filtered
+
+                            # ---- Duplicate-capture check: compare this
+                            # capture against the immediately previous one.
+                            # If they're near-identical, the target app has
+                            # likely stopped producing new data - pause and
+                            # let the user decide whether to keep going. ----
+                            if ($DupDetectEnabled -and $null -ne $global:CR_PrevCaptureText) {
+                                $similarity = Get-TextSimilarity -A $global:CR_PrevCaptureText -B $text
+                                if ($similarity -ge $DupDetectThreshold) {
+                                    if (-not $global:CR_SuppressDupWarning) {
+                                        $timer.Stop()
+                                        $pct = [Math]::Round($similarity * 100, 2)
+                                        Set-RelayStatus "-> $($global:CR_TargetTitle) : Duplicate capture ($pct% match)" ([System.Drawing.Color]::Yellow)
+                                        Write-Host "[CommandRelay] Duplicate capture detected ($pct% match with the previous one)." -ForegroundColor Yellow
+
+                                        $choice = Show-DuplicateCapturePrompt -Similarity $similarity -TargetTitle $global:CR_TargetTitle
+                                        if ($choice -eq 'Stop') {
+                                            $global:CR_Running = $false
+                                            Hide-RelayStatus
+                                            Write-Host "[CommandRelay] Capture STOPPED (duplicate content confirmed by user)." -ForegroundColor Cyan
+                                            $stopRequested = $true
+                                        } else {
+                                            # Don't nag again every single cycle - only re-arm once a
+                                            # genuinely different capture comes in (see the 'else' below).
+                                            $global:CR_SuppressDupWarning = $true
+                                            Write-Host "[CommandRelay] Continuing despite duplicate content (won't ask again until new content appears)." -ForegroundColor Yellow
+                                        }
+
+                                        if ($global:CR_Running) { $timer.Start() }
+                                    }
+                                } else {
+                                    $global:CR_SuppressDupWarning = $false
+                                }
+                            }
+
+                            $global:CR_PrevCaptureText = $text
+
+                            if (-not $stopRequested) {
+                                $filtered = Get-FilteredCaptureText -Text $text -SkipStart $SkipRowsStart -SkipEnd $SkipRowsEnd
+                                if (-not [string]::IsNullOrEmpty($filtered)) {
+                                    Add-Content -Path $global:CR_LogFile -Value $filtered
+                                }
                             }
                         }
                     } catch {
                         Write-Host "Clipboard read failed: $_" -ForegroundColor Yellow
                     }
+
+                    if ($stopRequested) { return }
 
                     if (-not (Set-RelayForeground -Handle $global:CR_TargetHandle)) {
                         Write-Host "[CommandRelay] Target window is gone - stopping capture." -ForegroundColor Red
@@ -652,6 +810,8 @@ $hotkeyAction = {
                 $global:CR_Running      = $true
                 $global:CR_State        = 'Idle'
                 $global:CR_ElapsedMs    = 0
+                $global:CR_PrevCaptureText    = $null
+                $global:CR_SuppressDupWarning = $false
                 Write-Host "[CommandRelay] Capture STARTED -> $($global:CR_LogFile)" -ForegroundColor Green
                 Write-Host "[CommandRelay] Target window -> $($target.Title)" -ForegroundColor Green
                 Set-RelayStatus "-> $($target.Title) : starting..." ([System.Drawing.Color]::Lime)

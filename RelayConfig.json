@@ -5,6 +5,8 @@
     "TimerTickMs":  250,
     "ActionKeyDisplay":  "F8",
     "ActionKeyToken":  "{F8}",
+    "DupDetectEnabled":  true,
+    "DupDetectThreshold":  0.995,
     "ToggleHotkey":  {
                          "Modifiers":  6,
                          "Key":  80,
