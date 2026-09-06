@@ -21,10 +21,18 @@ Run:
 Then, with 2+ objects selected in PowerPoint, press the hotkey below.
 """
 
+import argparse
 import subprocess
+from datetime import datetime
+
 from pynput import keyboard
 
 HOTKEY = "<cmd>+<alt>+r"  # change to whatever combo you want
+
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 ALIGN_MIDDLE_SCRIPT = '''
 tell application "Microsoft PowerPoint"
@@ -63,11 +71,46 @@ end tell
 
 
 def align_row():
-    subprocess.run(["osascript", "-e", ALIGN_MIDDLE_SCRIPT])
+    log(f"Hotkey {HOTKEY} activated - aligning selection...")
+    result = subprocess.run(
+        ["osascript", "-e", ALIGN_MIDDLE_SCRIPT], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log(f"AppleScript error: {result.stderr.strip()}")
+    else:
+        log("Done.")
+
+
+def test_keys():
+    """Logs every keypress so you can confirm the listener actually
+    receives keyboard input (i.e. Input Monitoring permission is granted).
+    Press Esc to stop."""
+    log("Key test mode - press any key, Esc to stop.")
+
+    def on_press(key):
+        log(f"key pressed: {key}")
+        if key == keyboard.Key.esc:
+            return False
+
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
+    log("Key test finished. If nothing was logged above, macOS hasn't granted Input Monitoring yet.")
 
 
 def main():
-    print(f"Listening for {HOTKEY} - select 2+ objects in PowerPoint, then press it.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--test-keys",
+        action="store_true",
+        help="log every keypress instead of listening for the hotkey, to verify the listener works",
+    )
+    args = parser.parse_args()
+
+    if args.test_keys:
+        test_keys()
+        return
+
+    log(f"Listening for {HOTKEY} - select 2+ objects in PowerPoint, then press it.")
     with keyboard.GlobalHotKeys({HOTKEY: align_row}) as h:
         h.join()
 
